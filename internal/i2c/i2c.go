@@ -74,6 +74,19 @@ func (b *Bus) Close() (err error) {
 	return
 }
 
+// Do calls function f with given bus and slave device selected.
+func Do(index, slave int, f func(bus *Bus) error) (err error) {
+	var bus Bus
+	if err = bus.Open(index); err != nil {
+		return
+	}
+	defer bus.Close()
+	if err = bus.ForceSlaveAddress(slave); err != nil {
+		return
+	}
+	return f(&bus)
+}
+
 func ioctlInt(b *Bus, op IoctlOp, arg int) (err error) {
 	_, _, e := syscall.RawSyscall(syscall.SYS_IOCTL, uintptr(b.fd), uintptr(op), uintptr(arg))
 	if e != 0 {
