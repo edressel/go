@@ -115,7 +115,7 @@ type qsfpRegs struct {
 
 // Upper memory map (page select 0)
 // Read only.
-type SfpRegs struct {
+type Regs struct {
 	Id                           SfpId
 	ExtendedId                   byte
 	ConnectorType                SfpConnectorType

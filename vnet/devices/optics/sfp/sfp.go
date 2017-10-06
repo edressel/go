@@ -27,7 +27,7 @@ type QsfpModuleConfig struct {
 
 type QsfpModule struct {
 	// Read in when module is inserted and taken out of reset.
-	sfpRegs SfpRegs
+	sfpRegs Regs
 
 	signals [QsfpNSignal]QsfpSignal
 
@@ -191,7 +191,7 @@ func trim(b []byte) string {
 	return strings.TrimSpace(string(b))
 }
 
-func (r *SfpRegs) String() string {
+func (r *Regs) String() string {
 	s := fmt.Sprintf("Id: %s, Connector Type: %s", r.Id.String(), r.ConnectorType.String())
 	s += fmt.Sprintf("\n  Vendor: %s, Part Number %s, Revision %s, Serial %s, Date %s",
 		trim(r.VendorName[:]), trim(r.VendorPartNumber[:]), trim(r.VendorRevision[:]),
