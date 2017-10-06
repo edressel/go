@@ -198,6 +198,11 @@ func (m *net_namespace_main) discovery_is_done() bool {
 
 // Called when initial netlink dump via netlink.Listen completes.
 func (m *Main) namespace_discovery_done() {
+	// Already done?
+	if m.discovery_is_done() {
+		return
+	}
+	// Mark discovery done when all initial namespaces are discovered.
 	nm := &m.net_namespace_main
 	if atomic.AddInt32(&nm.n_init_namespace_to_discover, -1) == 0 {
 		if err := m.netlink_discovery_done_for_all_namespaces(); err != nil {
@@ -598,7 +603,7 @@ func (ns *net_namespace) add_del_interface(m *Main, msg *netlink.IfInfoMessage) 
 		}
 
 		if !exists && intf.kind == netlink.InterfaceKindVlan {
-			m.add_del_vlan(intf, msg, is_del)
+			err = m.add_del_vlan(intf, msg, is_del)
 		}
 	} else {
 		intf, ok := ns.interface_by_index[index]
@@ -636,7 +641,7 @@ func (m *net_namespace_main) find_interface_with_ifindex(index uint32) (intf *ne
 	return
 }
 
-func (m *net_namespace_main) add_del_vlan(intf *net_namespace_interface, msg *netlink.IfInfoMessage, is_del bool) {
+func (m *net_namespace_main) add_del_vlan(intf *net_namespace_interface, msg *netlink.IfInfoMessage, is_del bool) (err error) {
 	ns := intf.namespace
 	sup_index := msg.Attrs[netlink.IFLA_LINK].(netlink.Uint32Attr).Uint()
 	sup_si := vnet.SiNil
@@ -645,6 +650,10 @@ func (m *net_namespace_main) add_del_vlan(intf *net_namespace_interface, msg *ne
 	sup_intf := ns.interface_by_index[sup_index]
 	if sup_intf == nil {
 		sup_intf = m.find_interface_with_ifindex(sup_index)
+	}
+	if sup_intf == nil {
+		err = fmt.Errorf("sup interface not found")
+		return
 	}
 
 	sup_si = sup_intf.si
@@ -674,6 +683,7 @@ func (m *net_namespace_main) add_del_vlan(intf *net_namespace_interface, msg *ne
 		si := ns.m.m.v.NewSwSubInterface(hw.Si(), vnet.IfId(eid))
 		m.set_si(intf, si)
 	}
+	return
 }
 
 func (m *net_namespace_main) interface_by_name(name string) (ns *net_namespace, intf *net_namespace_interface) {
@@ -900,7 +910,7 @@ func (ns *net_namespace) add(m *net_namespace_main, e *add_del_namespace_event) 
 			break
 		}
 		// Timeout?
-		if time.Since(e.time_start) > 100*time.Millisecond {
+		if time.Since(e.time_start) > 5*time.Second {
 			return
 		}
 		// Need retry?
