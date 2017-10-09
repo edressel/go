@@ -10,10 +10,10 @@ type QsfpSignal uint8
 
 const (
 	QsfpLowPowerMode QsfpSignal = iota
-	QsfpInterruptL
-	QsfpModulePresentL
-	QsfpModuleSelectL
-	QsfpResetL
+	QsfpInterruptStatus
+	QsfpModuleIsPresent
+	QsfpModuleSelected
+	QsfpResetIsActive
 	QsfpNSignal
 )
 
@@ -110,16 +110,27 @@ type qsfpRegs struct {
 
 	upperMemoryMapPageSelect reg8
 
-	upperMemory [128]reg8
+	upperMemory [128 / 2]reg16
 }
 
 // Upper memory map (page select 0)
 // Read only.
-type Regs struct {
-	Id                           SfpId
-	ExtendedId                   byte
-	ConnectorType                SfpConnectorType
-	Compatibility                [8]byte
+type Eeprom struct {
+	Id            SfpId
+	ExtendedId    byte
+	ConnectorType SfpConnectorType
+
+	// Byte 131 Compatibility[0] SfpCompliance
+	//   [0] 40G active cable xlppi
+	//   [1] 40GBASE-LR4
+	//   [2] 40GBASE-SR4
+	//   [3] 40GBASE-CR4
+	//   [4] 10GBASE-SR
+	//   [5] 10GBASE-LR
+	//   [6] 10GBASE-LRM
+	//   [7] Extended (Options[0] becomes SfpExtendedCompliance)
+	Compatibility [8]byte
+
 	Encoding                     byte
 	NominalBitRate100MbitsPerSec byte
 	_                            byte
