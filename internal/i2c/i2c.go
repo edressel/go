@@ -225,14 +225,16 @@ const BlockMax = 32
 type SMBusData [BlockMax + 2]byte
 
 func (b *Bus) Do(rw RW, command uint8, size SMBusSize, data *SMBusData) (err error) {
-	defer func() {
-		tag := "write"
-		if rw == Read {
-			tag = "read"
-		}
-		err = chk(tag, err)
-	}()
+	err = b.ReadWrite(rw, command, size, data)
+	tag := "write"
+	if rw == Read {
+		tag = "read"
+	}
+	err = chk(tag, err)
+	return
+}
 
+func (b *Bus) ReadWrite(rw RW, command uint8, size SMBusSize, data *SMBusData) (err error) {
 	var zero SMBusData
 	if data == nil {
 		data = &zero
