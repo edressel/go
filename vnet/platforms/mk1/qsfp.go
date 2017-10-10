@@ -11,6 +11,7 @@ import (
 	"github.com/platinasystems/go/vnet/devices/optics/sfp"
 	fe1_platform "github.com/platinasystems/go/vnet/platforms/fe1"
 
+	"syscall"
 	"time"
 )
 
@@ -46,9 +47,9 @@ func readWriteQsfp(addr uint8, b []byte, isWrite bool) (err error) {
 			if isWrite {
 				d[0] = b[i+0]
 				d[1] = b[i+1]
-				err = bus.Write(addr+uint8(i), i2c.WordData, &d)
+				err = bus.ReadWrite(i2c.Write, addr+uint8(i), i2c.WordData, &d)
 			} else {
-				err = bus.Read(addr+uint8(i), i2c.WordData, &d)
+				err = bus.ReadWrite(i2c.Read, addr+uint8(i), i2c.WordData, &d)
 				if err == nil {
 					b[i+0] = d[0]
 					b[i+1] = d[1]
@@ -68,9 +69,9 @@ func readWriteQsfp(addr uint8, b []byte, isWrite bool) (err error) {
 			var d i2c.SMBusData
 			if isWrite {
 				d[0] = b[i+0]
-				err = bus.Write(addr+uint8(i), i2c.ByteData, &d)
+				err = bus.ReadWrite(i2c.Write, addr+uint8(i), i2c.ByteData, &d)
 			} else {
-				err = bus.Read(addr+uint8(i), i2c.ByteData, &d)
+				err = bus.ReadWrite(i2c.Read, addr+uint8(i), i2c.ByteData, &d)
 				if err == nil {
 					b[i+0] = d[0]
 				}
@@ -103,37 +104,39 @@ type qsfpSignals struct {
 
 // j == 0 => abs_l + int_l
 // j == 1 => lpmode + rst_l
-func readSignals(j uint) (v [2]uint64) {
+func readSignals(j uint) (v [2]uint32) {
 	i2c.Do(0, mux0_addr, func(bus *i2c.Bus) (err error) {
 		var d i2c.SMBusData
 		d[0] = 1 << (4 + j)
 		err = bus.Write(0, i2c.ByteData, &d)
 		return
 	})
-	// Read 0x20 21 22 23 to get 64 bits of status.
+	// Read 0x20 21 22 23 to get 32 bits of status.
 	for i := 0; i < 4; i++ {
 		i2c.Do(0, qsfp_gpio_base_addr+i,
 			func(bus *i2c.Bus) (err error) {
 				var d i2c.SMBusData
 				err = bus.Read(0, i2c.WordData, &d)
-				v[i/2] |= (uint64(d[0]) | uint64(d[1])<<8) << (16 * uint(i%2))
+				v[i/2] |= (uint32(d[0]) | uint32(d[1])<<8) << (16 * uint(i%2))
 				return
 			})
 	}
 	return
 }
 
+const m32 = 1<<32 - 1
+
 func (s *qsfpStatus) read() {
 	v := readSignals(0)
-	s.is_present = ^v[0]
-	s.interrupt_status = ^v[1]
+	s.is_present = m32 &^ uint64(v[0])
+	s.interrupt_status = m32 &^ uint64(v[1])
 }
 
 func (s *qsfpSignals) read() {
 	s.qsfpStatus.read()
 	v := readSignals(1)
-	s.is_low_power_mode = v[0]
-	s.is_reset_active = ^v[1]
+	s.is_low_power_mode = uint64(v[0])
+	s.is_reset_active = m32 &^ uint64(v[1])
 }
 
 func writeSignal(port uint, is_rst_l bool, value uint64) {
@@ -171,7 +174,9 @@ func (m *qsfpMain) signalChange(signal sfp.QsfpSignal, changedPorts, newValues u
 	elib.Word(changedPorts).ForeachSetBit(func(i uint) {
 		port := i ^ 1 // mk1 port swapping
 		mod := m.module_by_port[port]
-		mod.q.SetSignal(signal, newValues&(1<<i) != 0)
+		v := newValues&(1<<i) != 0
+		q := &mod.q
+		q.SetSignal(signal, v)
 	})
 }
 
@@ -235,9 +240,15 @@ func (q *qsfpModule) SfpSetLowPowerMode(is bool) {
 		q.m.current.writeLpmode(q.port_index)
 	}
 }
-func (q *qsfpModule) SfpReadWrite(offset uint, p []uint8, isWrite bool) {
+func (q *qsfpModule) SfpReadWrite(offset uint, p []uint8, isWrite bool) (write_ok bool) {
 	i2cMuxSelectPort(q.port_index)
-	readWriteQsfp(uint8(offset), p, isWrite)
+	err := readWriteQsfp(uint8(offset), p, isWrite)
+	if write_ok = err == nil; !write_ok {
+		if errno, ok := err.(syscall.Errno); !ok || errno != syscall.ENXIO {
+			panic(err)
+		}
+	}
+	return
 }
 
 func qsfpInit(v *vnet.Vnet, p *fe1_platform.Platform) {
