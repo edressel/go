@@ -29,7 +29,7 @@ type Access interface {
 	SfpReset(active bool)
 	// Enable/disable low power mode.
 	SfpSetLowPowerMode(enable bool)
-	SfpReadWrite(offset uint, p []uint8, isWrite bool)
+	SfpReadWrite(offset uint, p []uint8, isWrite bool) (ok bool)
 }
 
 type state struct {
@@ -38,7 +38,11 @@ type state struct {
 
 type QsfpModule struct {
 	// Read in when module is inserted and taken out of reset.
-	Eeprom
+	e Eeprom
+	// Only compliance values from EEPROM are valid.
+	eepromDataplaneSubsetValid bool
+	// All values from EEPROM are valid.
+	allEepromValid bool
 
 	signalValues [QsfpNSignal]bool
 
@@ -49,20 +53,24 @@ type QsfpModule struct {
 }
 
 func getQsfpRegs() *qsfpRegs { return (*qsfpRegs)(hw.BasePointer) }
+func getEepromRegs() *Eeprom {
+	r := getQsfpRegs()
+	return (*Eeprom)(unsafe.Pointer(hw.BaseAddress + uintptr(r.upperMemory[0].offset())))
+}
 
 func (r *reg8) offset() uint  { return uint(uintptr(unsafe.Pointer(r)) - hw.BaseAddress) }
 func (r *reg16) offset() uint { return uint(uintptr(unsafe.Pointer(r)) - hw.BaseAddress) }
 
-func (r *reg8) get(m *QsfpModule) uint8 {
+func (r *reg8) get(m *QsfpModule) reg8 {
 	var b [1]uint8
 	m.a.SfpReadWrite(r.offset(), b[:], false)
-	return b[0]
+	return reg8(b[0])
 }
 
-func (r *reg8) set(m *QsfpModule, v uint8) {
+func (r *reg8) set(m *QsfpModule, v uint8) bool {
 	var b [1]uint8
 	b[0] = v
-	m.a.SfpReadWrite(r.offset(), b[:], true)
+	return m.a.SfpReadWrite(r.offset(), b[:], true)
 }
 
 func (r *reg16) get(m *QsfpModule) (v uint16) {
@@ -71,11 +79,11 @@ func (r *reg16) get(m *QsfpModule) (v uint16) {
 	return uint16(b[0])<<8 | uint16(b[1])
 }
 
-func (r *reg16) set(m *QsfpModule, v uint16) {
+func (r *reg16) set(m *QsfpModule, v uint16) (ok bool) {
 	var b [2]uint8
 	b[0] = uint8(v >> 8)
 	b[1] = uint8(v)
-	m.a.SfpReadWrite(r.offset(), b[:], true)
+	return m.a.SfpReadWrite(r.offset(), b[:], true)
 }
 
 func (r *regi16) get(m *QsfpModule) (v int16) { v = int16((*reg16)(r).get(m)); return }
@@ -122,41 +130,46 @@ func (m *QsfpModule) Present(is bool) {
 
 	if !is {
 		m.invalidateCache()
-		return
-	}
-
-	// Wait for module to become ready.
-	start := time.Now()
-	for r.status.get(m)&(1<<0) != 0 {
-		if time.Since(start) >= 100*time.Millisecond {
-			panic("ready timeout")
+	} else {
+		// Wait for module to become ready.
+		start := time.Now()
+		for r.status.get(m)&(1<<0) != 0 {
+			if time.Since(start) >= 100*time.Millisecond {
+				panic("ready timeout")
+			}
 		}
-	}
-
-	// Read EEPROM.
-	if r.upperMemoryMapPageSelect.get(m) != 0 {
-		r.upperMemoryMapPageSelect.set(m, 0)
-	}
-	p := (*[128 / 2]uint16)(unsafe.Pointer(&m.Eeprom))
-	for i := range p {
-		p[i] = r.upperMemory[i].get(m)
-	}
-
-	// Might as well select page 3 forever.
-	r.upperMemoryMapPageSelect.set(m, 3)
-	if false {
-		tr := (*qsfpThresholdRegs)(unsafe.Pointer(&r.upperMemory[0]))
-		m.Config.TemperatureInCelsius.get(m, &tr.temperature, TemperatureToCelsius)
-		m.Config.SupplyVoltageInVolts.get(m, &tr.supplyVoltage, SupplyVoltageToVolts)
-		m.Config.RxPowerInWatts.get(m, &tr.rxPower, RxPowerToWatts)
-		m.Config.TxBiasCurrentInAmps.get(m, &tr.txBiasCurrent, TxBiasCurrentToAmps)
+		// Read enough of EEPROM to keep dataplane happy.
+		// Reading eeprom is slow over i2c.
+		if r.upperMemoryMapPageSelect.get(m) != 0 {
+			r.upperMemoryMapPageSelect.set(m, 0)
+		}
+		m.validateCache(false)
 	}
 }
 
-func (m *QsfpModule) validateCache() {
+func (m *QsfpModule) validateCache(everything bool) {
+	r := getQsfpRegs()
+	if everything && !m.allEepromValid {
+		// Read whole EEPROM.
+		m.allEepromValid = true
+		p := (*[128]uint8)(unsafe.Pointer(&m.e))
+		m.a.SfpReadWrite(r.upperMemory[0].offset(), p[:], false)
+	} else if !m.eepromDataplaneSubsetValid {
+		// For performance only read fields needed for data plane.
+		m.eepromDataplaneSubsetValid = true
+		er := getEepromRegs()
+		m.e.Id = Id((*reg8)(&er.Id).get(m))
+		m.e.ConnectorType = ConnectorType((*reg8)(&er.ConnectorType).get(m))
+		m.e.Compatibility[0] = er.Compatibility[0].get(m)
+		if Compliance(m.e.Compatibility[0])&ComplianceExtendedValid != 0 {
+			m.e.Options[0] = er.Options[0].get(m)
+		}
+	}
 }
 
 func (m *QsfpModule) invalidateCache() {
+	m.allEepromValid = false
+	m.eepromDataplaneSubsetValid = false
 }
 
 func (m *QsfpModule) TxEnable(enableMask, laneMask uint) uint {
@@ -171,38 +184,42 @@ func (m *QsfpModule) TxEnable(enableMask, laneMask uint) uint {
 	return uint(was)
 }
 
-func (r *Eeprom) GetCompliance() (c SfpCompliance, x SfpExtendedCompliance) {
-	c = SfpCompliance(r.Compatibility[0])
-	x = SfpExtendedComplianceUnspecified
-	if c&SfpComplianceExtendedValid != 0 {
-		x = SfpExtendedCompliance(r.Options[0])
+func (m *QsfpModule) GetId() Id                       { return m.e.Id }
+func (m *QsfpModule) GetConnectorType() ConnectorType { return m.e.ConnectorType }
+func (m *QsfpModule) GetCompliance() (c Compliance, x ExtendedCompliance) {
+	c = Compliance(m.e.Compatibility[0])
+	x = ExtendedComplianceUnspecified
+	if c&ComplianceExtendedValid != 0 {
+		x = ExtendedCompliance(m.e.Options[0])
 	}
 	return
 }
 
-func trim(b []byte) string {
+func trim(r []reg8) string {
 	// Strip trailing nulls.
-	if i := strings.IndexByte(string(b), 0); i >= 0 {
-		b = b[:i]
+	var b []byte
+	for i := 0; i < len(r); i++ {
+		if r[i] == 0 {
+			break
+		}
+		b = append(b, byte(r[i]))
 	}
 	return strings.TrimSpace(string(b))
 }
 
-func (r *Eeprom) String() string {
-	s := fmt.Sprintf("Id: %v", r.Id)
+func (m *QsfpModule) String() string {
+	m.validateCache(true)
+	e := &m.e
+	s := fmt.Sprintf("Id: %v", e.Id)
 	s += fmt.Sprintf("\n  Vendor: %s, Part Number %s, Revision 0x%x, Serial %s, Date %s",
-		trim(r.VendorName[:]), trim(r.VendorPartNumber[:]), trim(r.VendorRevision[:]),
-		trim(r.VendorSerialNumber[:]), trim(r.VendorDateCode[:]))
-	s += fmt.Sprintf("\n  Connector Type: %v", r.ConnectorType)
+		trim(e.VendorName[:]), trim(e.VendorPartNumber[:]), trim(e.VendorRevision[:]),
+		trim(e.VendorSerialNumber[:]), trim(e.VendorDateCode[:]))
+	s += fmt.Sprintf("\n  Connector Type: %v", e.ConnectorType)
 
-	c, x := r.GetCompliance()
+	c, x := m.GetCompliance()
 	s += fmt.Sprintf("\n  Compliance: %v", c)
-	if x != SfpExtendedComplianceUnspecified {
+	if x != ExtendedComplianceUnspecified {
 		s += fmt.Sprintf(" %v", x)
 	}
 	return s
-}
-
-func (m *QsfpModule) String() string {
-	return m.Eeprom.String()
 }
